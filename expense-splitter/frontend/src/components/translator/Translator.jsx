@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect } from "react";
 import { get, post } from "../../utils/api";
 
 const LANG_NAMES = {
@@ -17,101 +17,77 @@ const USE_CASES = [
 ];
 
 const SAMPLE_TEXTS = {
-  ta: "சாம்பார் சாதம் - ₹80\nதோசை - ₹60\nகாபி - ₹30",
+  ta: "விலைப்பட்டியல்\nபூரி மசாலா - ₹30\nவடை - ₹6\nபொங்கல் - ₹30",
   hi: "स्वागत है\nकृपया जूते बाहर उतारें\nधन्यवाद",
   ja: "本日のランチ\nラーメン ¥800\nチャーハン ¥700",
-  zh: "欢迎光临\n今日特餐\n请保持安静",
-  ko: "오늘의 메뉴\n비빔밥 ₩8,000\n된장찌개 ₩7,000",
-  fr: "Bienvenue\nDéfense de fumer\nMerci de votre visite",
+  zh: "欢迎光临\n今日特餐",
+  ko: "오늘의 메뉴\n비빔밥 ₩8,000",
+  fr: "Bienvenue\nDéfense de fumer",
 };
 
 export default function Translator() {
-  const [mode, setMode]           = useState("upload"); // upload | camera | text
+  const [mode, setMode]            = useState("upload");
   const [imagePreview, setImgPrev] = useState(null);
-  const [imageB64, setImgB64]     = useState(null);
-  const [manualText, setManual]   = useState("");
-  const [sourceLang, setSrc]      = useState("auto");
-  const [targetLang, setTgt]      = useState("en");
-  const [result, setResult]       = useState(null);
-  const [loading, setLoading]     = useState(false);
-  const [error, setError]         = useState(null);
-  const [langs, setLangs]         = useState(LANG_NAMES);
-  const [ttsPlaying, setTts]      = useState(false);
-  const [useCase, setUseCase]     = useState(null);
-  const [dragOver, setDragOver]   = useState(false);
-  const [copied, setCopied]       = useState(false);
+  const [imageB64, setImgB64]      = useState(null);
+  const [manualText, setManual]    = useState("");
+  const [sourceLang, setSrc]       = useState("auto");
+  const [targetLang, setTgt]       = useState("en");
+  const [result, setResult]        = useState(null);
+  const [loading, setLoading]      = useState(false);
+  const [error, setError]          = useState(null);
+  const [ttsPlaying, setTts]       = useState(false);
+  const [copied, setCopied]        = useState(false);
+  const [dragOver, setDragOver]    = useState(false);
+  const [activeUseCase, setUseCase]= useState(null);
+  const [langs, setLangs]          = useState(LANG_NAMES);
 
-  const fileRef    = useRef();
-  const videoRef   = useRef();
-  const canvasRef  = useRef();
-  const streamRef  = useRef();
+  const fileRef  = useRef();
+  const videoRef = useRef();
+  const canvasRef= useRef();
+  const streamRef= useRef();
 
   useEffect(() => {
     get("/translate/languages").then(setLangs).catch(() => {});
     return () => stopCamera();
   }, []);
 
-  // ── Camera ───────────────────────────────────────────────────
   async function startCamera() {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
-      streamRef.current = stream;
-      if (videoRef.current) videoRef.current.srcObject = stream;
+      const s = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      streamRef.current = s;
+      if (videoRef.current) videoRef.current.srcObject = s;
     } catch { setError("Camera access denied."); }
   }
-
   function stopCamera() {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(t => t.stop());
-      streamRef.current = null;
-    }
+    if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
   }
-
   function capturePhoto() {
     const v = videoRef.current, c = canvasRef.current;
     if (!v || !c) return;
     c.width = v.videoWidth; c.height = v.videoHeight;
     c.getContext("2d").drawImage(v, 0, 0);
-    const dataUrl = c.toDataURL("image/png");
-    setImgPrev(dataUrl);
-    setImgB64(dataUrl);
-    stopCamera();
+    const png = c.toDataURL("image/png");
+    setImgPrev(png); setImgB64(png); stopCamera();
   }
+  useEffect(() => { if (mode === "camera") startCamera(); else stopCamera(); }, [mode]);
 
-  useEffect(() => {
-    if (mode === "camera") startCamera();
-    else stopCamera();
-  }, [mode]);
-
-  // ── File upload ──────────────────────────────────────────────
   function handleFile(file) {
     if (!file || !file.type.startsWith("image/")) { setError("Please upload an image file."); return; }
     const reader = new FileReader();
     reader.onload = e => {
-      const dataUrl = e.target.result;
-      // normalise to PNG via canvas so backend always gets clean bytes
       const img = new window.Image();
       img.onload = () => {
         const cvs = document.createElement("canvas");
-        cvs.width = img.naturalWidth;
-        cvs.height = img.naturalHeight;
+        cvs.width = img.naturalWidth; cvs.height = img.naturalHeight;
         cvs.getContext("2d").drawImage(img, 0, 0);
         const png = cvs.toDataURL("image/png");
-        setImgPrev(png);
-        setImgB64(png);
-        setResult(null);
+        setImgPrev(png); setImgB64(png); setResult(null); setError(null);
       };
-      img.src = dataUrl;
+      img.src = e.target.result;
     };
     reader.readAsDataURL(file);
   }
 
-  function onDrop(e) {
-    e.preventDefault(); setDragOver(false);
-    handleFile(e.dataTransfer.files[0]);
-  }
-
-  // ── Translate ────────────────────────────────────────────────
   async function translate() {
     setError(null); setResult(null); setLoading(true);
     try {
@@ -128,120 +104,136 @@ export default function Translator() {
     setLoading(false);
   }
 
-  // ── TTS ──────────────────────────────────────────────────────
   function speak(text, lang) {
     if (!window.speechSynthesis) return;
     window.speechSynthesis.cancel();
     const utt = new SpeechSynthesisUtterance(text);
     utt.lang = lang === "auto" ? "en" : lang;
-    utt.onstart = () => setTts(true);
-    utt.onend   = () => setTts(false);
+    utt.onstart = () => setTts(true); utt.onend = () => setTts(false);
     window.speechSynthesis.speak(utt);
   }
-
   function copy(text) {
     navigator.clipboard.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); });
   }
 
-  function loadSample(langCode) {
-    const sample = SAMPLE_TEXTS[langCode];
-    if (sample) { setManual(sample); setSrc(langCode); setMode("text"); setResult(null); }
-  }
-
+  const hasResult = result && result.original;
   const detectedName = result?.detected_lang ? (langs[result.detected_lang] || result.detected_lang) : null;
 
   return (
-    <div style={S.root}>
-      {/* ── hero header ── */}
-      <div style={S.hero}>
-        <div style={S.heroGlow} />
-        <div style={S.heroContent}>
-          <div style={S.heroIcon}>🌐</div>
+    <div style={S.page}>
+      <style>{`
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes fadeUp { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:translateY(0); } }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+        .tr-tab:hover { background: var(--color-background-secondary) !important; }
+        .tr-uc:hover { border-color: #1a73e8 !important; color: #1a73e8 !important; }
+        .tr-action:hover { background: var(--color-background-secondary) !important; }
+        .tr-sample:hover { color: #1a73e8 !important; border-color: #1a73e8 !important; }
+        .tr-drop:hover { border-color: #1a73e8 !important; }
+        .tr-swap:hover { background: var(--color-background-secondary) !important; }
+        .tr-translate:hover:not(:disabled) { opacity: 0.88 !important; }
+      `}</style>
+
+      {/* header */}
+      <div style={S.hdr}>
+        <div style={S.hdrTop}>
+          <div style={S.hdrIcon}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+          </div>
           <div>
-            <h2 style={S.heroTitle}>Travel Translator</h2>
-            <p style={S.heroSub}>Snap, upload or type — translate instantly</p>
+            <div style={S.hdrTitle}>Travel Translator</div>
+            <div style={S.hdrSub}>Snap, upload or type text to translate instantly</div>
           </div>
         </div>
-        {/* use case chips */}
-        <div style={S.chips}>
+        <div style={S.ucRow}>
           {USE_CASES.map(u => (
-            <button key={u.label}
-              style={{ ...S.chip, ...(useCase === u.label ? S.chipActive : {}) }}
-              onClick={() => setUseCase(useCase === u.label ? null : u.label)}>
-              {u.icon} {u.label}
+            <button key={u.label} className="tr-uc"
+              onClick={() => setUseCase(activeUseCase === u.label ? null : u.label)}
+              style={{ ...S.ucChip, ...(activeUseCase === u.label ? S.ucActive : {}) }}>
+              <span style={{ fontSize: 12 }}>{u.icon}</span>{u.label}
             </button>
           ))}
         </div>
       </div>
 
+      {/* body */}
       <div style={S.body}>
-        {/* ── left panel ── */}
-        <div style={S.panel}>
 
-          {/* mode tabs */}
+        {/* LEFT */}
+        <div style={S.left}>
+
+          {/* tabs */}
           <div style={S.tabs}>
-            {[["upload","📁","Upload"], ["camera","📷","Camera"], ["text","⌨️","Type Text"]].map(([m, ic, lb]) => (
-              <button key={m} onClick={() => { setMode(m); setResult(null); setError(null); }}
-                style={{ ...S.tab, ...(mode === m ? S.tabActive : {}) }}>
-                <span>{ic}</span><span>{lb}</span>
+            {[["upload","Upload Image"],["camera","Camera"],["text","Type Text"]].map(([m,lb]) => (
+              <button key={m} className="tr-tab"
+                onClick={() => { setMode(m); setResult(null); setError(null); }}
+                style={{ ...S.tab, ...(mode===m ? S.tabActive : {}) }}>
+                {lb}
               </button>
             ))}
           </div>
 
-          {/* ── UPLOAD MODE ── */}
+          {/* upload */}
           {mode === "upload" && (
-            <div style={{ ...S.dropzone, ...(dragOver ? S.dropzoneOver : {}) }}
-              onClick={() => fileRef.current.click()}
+            <div className="tr-drop"
+              style={{ ...S.drop, ...(dragOver ? S.dropOver : {}), cursor: imagePreview ? "default" : "pointer" }}
+              onClick={() => !imagePreview && fileRef.current.click()}
               onDragOver={e => { e.preventDefault(); setDragOver(true); }}
               onDragLeave={() => setDragOver(false)}
-              onDrop={onDrop}>
-              <input ref={fileRef} type="file" accept="image/*" style={{ display:"none" }}
-                onChange={e => handleFile(e.target.files[0])} />
+              onDrop={e => { e.preventDefault(); setDragOver(false); handleFile(e.dataTransfer.files[0]); }}>
+              <input ref={fileRef} type="file" accept="image/*" style={{ display:"none" }} onChange={e => handleFile(e.target.files[0])} />
               {imagePreview ? (
-                <div style={S.previewWrap}>
+                <div style={{ position:"relative" }}>
                   <img src={imagePreview} alt="preview" style={S.preview} />
-                  <button style={S.clearBtn} onClick={e => { e.stopPropagation(); setImgPrev(null); setImgB64(null); setResult(null); }}>✕ Clear</button>
+                  <div style={S.previewActions}>
+                    <button style={S.previewBtn} onClick={e => { e.stopPropagation(); setImgPrev(null); setImgB64(null); setResult(null); }}>Clear</button>
+                    <button style={S.previewBtn} onClick={e => { e.stopPropagation(); fileRef.current.click(); }}>Change</button>
+                  </div>
                 </div>
               ) : (
-                <div style={S.dropHint}>
-                  <div style={S.dropIcon}>📁</div>
-                  <div style={S.dropText}>Drop image here or click to browse</div>
-                  <div style={S.dropSub}>Signs · Menus · Notices · Labels</div>
+                <div style={S.dropInner}>
+                  <div style={S.dropIcon}>
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ color:"var(--color-text-tertiary)" }}><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                  </div>
+                  <div style={S.dropTitle}>Drop image here or click to browse</div>
+                  <div style={S.dropSub}>PNG · JPG · AVIF — signs, menus, notices</div>
                 </div>
               )}
             </div>
           )}
 
-          {/* ── CAMERA MODE ── */}
+          {/* camera */}
           {mode === "camera" && (
-            <div style={S.cameraWrap}>
+            <div style={S.camBox}>
               {imagePreview ? (
-                <div style={S.previewWrap}>
+                <div style={{ position:"relative" }}>
                   <img src={imagePreview} alt="captured" style={S.preview} />
-                  <button style={S.clearBtn} onClick={() => { setImgPrev(null); setImgB64(null); setResult(null); startCamera(); }}>🔄 Retake</button>
+                  <div style={S.previewActions}>
+                    <button style={S.previewBtn} onClick={() => { setImgPrev(null); setImgB64(null); setResult(null); startCamera(); }}>Retake</button>
+                  </div>
                 </div>
               ) : (
-                <>
-                  <video ref={videoRef} autoPlay playsInline muted style={S.video} />
+                <div>
+                  <video ref={videoRef} autoPlay playsInline muted style={{ width:"100%", display:"block", maxHeight:220, objectFit:"cover" }} />
                   <canvas ref={canvasRef} style={{ display:"none" }} />
-                  <button style={S.captureBtn} onClick={capturePhoto}>📸 Capture</button>
-                  <div style={S.camHint}>Point camera at text to translate</div>
-                </>
+                  <div style={{ padding:"12px", display:"flex", justifyContent:"center" }}>
+                    <button style={S.captureBtn} onClick={capturePhoto}>Capture</button>
+                  </div>
+                </div>
               )}
             </div>
           )}
 
-          {/* ── TEXT MODE ── */}
+          {/* text */}
           {mode === "text" && (
-            <div style={S.textWrap}>
-              <textarea style={S.textarea} rows={6}
-                placeholder="Type or paste text to translate..."
+            <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+              <textarea style={S.ta} rows={6} placeholder="Type or paste text to translate..."
                 value={manualText} onChange={e => { setManual(e.target.value); setResult(null); }} />
-              {/* sample texts */}
-              <div style={S.sampleRow}>
-                <span style={S.sampleLabel}>Try sample:</span>
+              <div style={{ display:"flex", alignItems:"center", gap:6, flexWrap:"wrap" }}>
+                <span style={{ fontSize:11, color:"var(--color-text-tertiary)" }}>Sample:</span>
                 {Object.keys(SAMPLE_TEXTS).map(lc => (
-                  <button key={lc} style={S.sampleBtn} onClick={() => loadSample(lc)}>
+                  <button key={lc} className="tr-sample" style={S.sampleBtn}
+                    onClick={() => { setManual(SAMPLE_TEXTS[lc]); setSrc(lc); setResult(null); }}>
                     {LANG_NAMES[lc]}
                   </button>
                 ))}
@@ -249,324 +241,212 @@ export default function Translator() {
             </div>
           )}
 
-          {/* ── language selectors ── */}
-          <div style={S.langRow}>
-            <div style={S.langBox}>
-              <label style={S.langLabel}>FROM</label>
-              <select style={S.langSel} value={sourceLang} onChange={e => setSrc(e.target.value)}>
+          {/* lang bar */}
+          <div style={S.langBar}>
+            <div style={S.langGroup}>
+              <div style={S.lgLabel}>FROM</div>
+              <select style={S.sel} value={sourceLang} onChange={e => setSrc(e.target.value)}>
                 {Object.entries(langs).map(([k,v]) => <option key={k} value={k}>{v}</option>)}
               </select>
             </div>
-            <button style={S.swapBtn} onClick={() => {
-              if (sourceLang !== "auto") { setSrc(targetLang); setTgt(sourceLang); }
-            }}>⇄</button>
-            <div style={S.langBox}>
-              <label style={S.langLabel}>TO</label>
-              <select style={S.langSel} value={targetLang} onChange={e => setTgt(e.target.value)}>
-                {Object.entries(langs).filter(([k]) => k !== "auto").map(([k,v]) => <option key={k} value={k}>{v}</option>)}
+            <button className="tr-swap" style={S.swapBtn}
+              onClick={() => { if(sourceLang!=="auto"){ setSrc(targetLang); setTgt(sourceLang); } }}>
+              ⇄
+            </button>
+            <div style={S.langGroup}>
+              <div style={S.lgLabel}>TO</div>
+              <select style={S.sel} value={targetLang} onChange={e => setTgt(e.target.value)}>
+                {Object.entries(langs).filter(([k]) => k!=="auto").map(([k,v]) => <option key={k} value={k}>{v}</option>)}
               </select>
             </div>
           </div>
 
-          {/* error */}
-          {error && <div style={S.error}>⚠️ {error}</div>}
+          {error && (
+            <div style={S.errBox}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+              <span style={{ fontSize:12 }}>{error}</span>
+            </div>
+          )}
 
-          {/* translate button */}
-          <button style={S.translateBtn} onClick={translate} disabled={loading}>
-            {loading ? (
-              <span style={S.spinner}>⟳ Translating...</span>
-            ) : (
-              <><span>🌐</span><span>Translate</span></>
-            )}
+          <button className="tr-translate" style={{ ...S.transBtn, opacity: loading ? 0.7 : 1 }} onClick={translate} disabled={loading}>
+            {loading
+              ? <><svg style={{ animation:"spin 0.8s linear infinite" }} width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg> Translating...</>
+              : <><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg> Translate</>
+            }
           </button>
         </div>
 
-        {/* ── right panel: result ── */}
-        <div style={S.resultPanel}>
-          {!result && !loading && (
-            <div style={S.resultEmpty}>
-              <div style={S.emptyGlobe}>🌏</div>
-              <div style={S.emptyTitle}>Translation will appear here</div>
-              <div style={S.emptySub}>Upload an image, use camera, or type text</div>
+        {/* RIGHT */}
+        <div style={S.right}>
+          {!hasResult && !loading && (
+            <div style={S.empty}>
+              <div style={S.emptyIcon}>
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" style={{ color:"var(--color-text-tertiary)" }}><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+              </div>
+              <div style={S.emptyTitle}>Translation appears here</div>
+              <div style={S.emptySub}>Upload an image, use your camera, or type text to get started</div>
+              <div style={{ display:"flex", flexDirection:"column", gap:8, marginTop:16, alignSelf:"stretch", maxWidth:220 }}>
+                {["Select source language", "Add image or type text", "Click Translate"].map((s,i) => (
+                  <div key={i} style={{ display:"flex", alignItems:"center", gap:10 }}>
+                    <div style={S.stepNum}>{i+1}</div>
+                    <div style={{ fontSize:12, color:"var(--color-text-secondary)" }}>{s}</div>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 
           {loading && (
-            <div style={S.resultEmpty}>
-              <div style={{ fontSize: 48, animation: "spin 1s linear infinite" }}>⟳</div>
-              <div style={S.emptyTitle}>Extracting & Translating...</div>
-              <div style={S.emptySub}>Reading text from your image</div>
+            <div style={S.empty}>
+              <div style={{ ...S.emptyIcon, animation:"pulse 1.4s ease infinite" }}>
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ color:"var(--color-text-tertiary)" }}><circle cx="12" cy="12" r="10"/><path d="M12 2a15.3 15.3 0 0 1 4 10"/></svg>
+              </div>
+              <div style={S.emptyTitle}>Extracting &amp; translating...</div>
             </div>
           )}
 
-          {result && !loading && (
-            <div style={S.resultContent}>
-              {/* detected lang badge */}
-              {detectedName && (
-                <div style={S.detectedBadge}>
-                  🔍 Detected: <b>{detectedName}</b>
-                  {result.ocr_engine && <span style={S.engineBadge}>OCR: {result.ocr_engine}</span>}
+          {hasResult && !loading && (
+            <div style={{ animation:"fadeUp 0.2s ease", display:"flex", flexDirection:"column", gap:12 }}>
+              {/* badges */}
+              <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
+                {detectedName && <div style={S.infoBadge}><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> Detected: {detectedName}</div>}
+                {result.ocr_engine && <div style={S.grayBadge}>OCR · {result.ocr_engine}</div>}
+                {result.trans_engine && <div style={S.grayBadge}>Translation · {result.trans_engine}</div>}
+              </div>
+
+              {/* original */}
+              <div style={S.card}>
+                <div style={S.cardHdr}>
+                  <div style={{ display:"flex", alignItems:"center", gap:7 }}>
+                    <div style={{ width:6, height:6, borderRadius:"50%", background:"#94a3b8" }}/>
+                    <span style={S.cardHdrTitle}>Original</span>
+                    <span style={S.langTag}>{langs[result.detected_lang] || sourceLang}</span>
+                  </div>
+                  <div style={{ display:"flex", gap:3 }}>
+                    <button className="tr-action" style={S.actionBtn} onClick={() => speak(result.original, result.detected_lang)}>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+                    </button>
+                    <button className="tr-action" style={S.actionBtn} onClick={() => copy(result.original)}>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                    </button>
+                  </div>
+                </div>
+                <div style={S.cardBody}>{result.original}</div>
+              </div>
+
+              {/* arrow */}
+              <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                <div style={{ flex:1, height:"0.5px", background:"var(--color-border-tertiary)" }}/>
+                <div style={S.arrowBadge}>
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>
+                  {langs[targetLang]}
+                </div>
+                <div style={{ flex:1, height:"0.5px", background:"var(--color-border-tertiary)" }}/>
+              </div>
+
+              {/* translated */}
+              <div style={{ ...S.card, border:"0.5px solid var(--color-border-success)", background:"var(--color-background-success)" }}>
+                <div style={S.cardHdr}>
+                  <div style={{ display:"flex", alignItems:"center", gap:7 }}>
+                    <div style={{ width:6, height:6, borderRadius:"50%", background:"#22c55e" }}/>
+                    <span style={S.cardHdrTitle}>Translation</span>
+                    <span style={S.langTag}>{langs[targetLang]}</span>
+                  </div>
+                  <div style={{ display:"flex", gap:3 }}>
+                    <button className="tr-action" style={S.actionBtn} onClick={() => speak(result.translated, targetLang)}>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+                    </button>
+                    <button className="tr-action" style={S.actionBtn} onClick={() => copy(result.translated)}>
+                      {copied
+                        ? <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+                        : <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                      }
+                    </button>
+                  </div>
+                </div>
+                <div style={{ ...S.cardBody, fontSize:15, fontWeight:500, color:"var(--color-text-success)" }}>{result.translated}</div>
+              </div>
+
+              {/* AR */}
+              {imagePreview && mode !== "text" && (
+                <div style={{ borderRadius:"var(--border-radius-lg)", overflow:"hidden", border:"0.5px solid var(--color-border-tertiary)" }}>
+                  <div style={{ padding:"8px 12px", fontSize:11, fontWeight:500, color:"var(--color-text-secondary)", borderBottom:"0.5px solid var(--color-border-tertiary)", display:"flex", alignItems:"center", gap:6 }}>
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 6v16l7-4 8 4 7-4V2l-7 4-8-4-7 4z"/><line x1="8" y1="2" x2="8" y2="18"/><line x1="16" y1="6" x2="16" y2="22"/></svg>
+                    AR preview — translation overlaid on image
+                  </div>
+                  <div style={{ position:"relative" }}>
+                    <img src={imagePreview} alt="ar" style={{ width:"100%", maxHeight:160, objectFit:"cover", opacity:0.5, display:"block" }} />
+                    <div style={{ position:"absolute", inset:0, display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}>
+                      <div style={{ background:"rgba(26,115,232,0.9)", color:"#fff", padding:"8px 14px", borderRadius:"var(--border-radius-md)", fontSize:13, fontWeight:500, textAlign:"center", maxWidth:"90%", whiteSpace:"pre-wrap" }}>
+                        {result.translated}
+                      </div>
+                    </div>
+                  </div>
                 </div>
               )}
+            </div>
+          )}
 
-              {/* no text found */}
-              {!result.original && (
-                <div style={S.noText}>😶 No text detected in image. Try a clearer photo.</div>
-              )}
-
-              {result.original && (
-                <>
-                  {/* original */}
-                  <div style={S.block}>
-                    <div style={S.blockHeader}>
-                      <span style={S.blockLabel}>📝 Original Text</span>
-                      <div style={S.blockActions}>
-                        <button style={S.iconBtn} onClick={() => speak(result.original, result.detected_lang)} title="Listen">
-                          🔊
-                        </button>
-                        <button style={S.iconBtn} onClick={() => copy(result.original)} title="Copy">
-                          📋
-                        </button>
-                      </div>
-                    </div>
-                    <div style={S.blockText}>{result.original}</div>
-                  </div>
-
-                  {/* arrow */}
-                  <div style={S.arrow}>↓ {langs[result.target_lang] || result.target_lang}</div>
-
-                  {/* translated */}
-                  <div style={{ ...S.block, ...S.blockHighlight }}>
-                    <div style={S.blockHeader}>
-                      <span style={{ ...S.blockLabel, color:"#34d399" }}>✨ Translation</span>
-                      <div style={S.blockActions}>
-                        <button style={S.iconBtn} onClick={() => speak(result.translated, result.target_lang)} title="Listen">
-                          {ttsPlaying ? "⏸" : "🔊"}
-                        </button>
-                        <button style={S.iconBtn} onClick={() => copy(result.translated)} title="Copy">
-                          {copied ? "✓" : "📋"}
-                        </button>
-                      </div>
-                    </div>
-                    <div style={{ ...S.blockText, ...S.translatedText }}>{result.translated}</div>
-                  </div>
-
-                  {/* AR overlay hint */}
-                  {imagePreview && mode !== "text" && (
-                    <div style={S.arCard}>
-                      <div style={S.arPreviewWrap}>
-                        <img src={imagePreview} alt="original" style={S.arImg} />
-                        <div style={S.arOverlay}>
-                          <div style={S.arText}>{result.translated}</div>
-                        </div>
-                      </div>
-                      <div style={S.arLabel}>🔮 AR Preview — translated text overlaid on image</div>
-                    </div>
-                  )}
-                </>
-              )}
+          {result && !result.original && !loading && (
+            <div style={S.empty}>
+              <div style={S.emptyTitle}>No text detected</div>
+              <div style={S.emptySub}>Try a clearer image with better lighting, or select the correct source language.</div>
             </div>
           )}
         </div>
       </div>
-
-      <style>{`
-        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-        @keyframes fadeUp { from { opacity:0; transform:translateY(16px); } to { opacity:1; transform:translateY(0); } }
-      `}</style>
     </div>
   );
 }
 
-// ── STYLES ─────────────────────────────────────────────────────────
 const S = {
-  root: {
-    fontFamily: "'DM Sans', 'Segoe UI', sans-serif",
-    color: "#e8e8f0",
-    display: "flex", flexDirection: "column", gap: 0,
-  },
-  // hero
-  hero: {
-    background: "linear-gradient(135deg, #0d2137 0%, #0a1628 100%)",
-    borderBottom: "1px solid #ffffff0a",
-    padding: "28px 32px 20px",
-    position: "relative", overflow: "hidden",
-  },
-  heroGlow: {
-    position: "absolute", top: -60, right: -60, width: 300, height: 300,
-    borderRadius: "50%", background: "radial-gradient(circle, #06b6d430 0%, transparent 70%)",
-    pointerEvents: "none",
-  },
-  heroContent: { display: "flex", alignItems: "center", gap: 16, marginBottom: 16, position: "relative" },
-  heroIcon: { fontSize: 40, filter: "drop-shadow(0 0 12px #06b6d4)" },
-  heroTitle: { margin: 0, fontSize: 24, fontWeight: 800, letterSpacing: "-0.5px", color: "#fff" },
-  heroSub: { margin: 0, fontSize: 13, color: "#94a3b8" },
-  chips: { display: "flex", flexWrap: "wrap", gap: 8, position: "relative" },
-  chip: {
-    padding: "5px 12px", borderRadius: 20, border: "1px solid #ffffff15",
-    background: "transparent", color: "#94a3b8", cursor: "pointer", fontSize: 12, fontWeight: 600,
-    transition: "all .15s",
-  },
-  chipActive: { background: "#06b6d420", border: "1px solid #06b6d460", color: "#06b6d4" },
-  // body
-  body: {
-    display: "grid", gridTemplateColumns: "1fr 1fr", gap: 0,
-    minHeight: 520,
-  },
-  panel: {
-    padding: "24px 28px", borderRight: "1px solid #ffffff0a",
-    display: "flex", flexDirection: "column", gap: 16,
-  },
-  // tabs
-  tabs: { display: "flex", gap: 6 },
-  tab: {
-    flex: 1, padding: "9px 8px", borderRadius: 10, border: "1px solid #ffffff0a",
-    background: "transparent", color: "#8888a0", cursor: "pointer",
-    fontSize: 12, fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
-    transition: "all .15s",
-  },
-  tabActive: { background: "#06b6d420", border: "1px solid #06b6d440", color: "#06b6d4" },
-  // dropzone
-  dropzone: {
-    border: "2px dashed #ffffff15", borderRadius: 14,
-    minHeight: 200, display: "flex", alignItems: "center", justifyContent: "center",
-    cursor: "pointer", transition: "all .2s", background: "#ffffff03",
-    overflow: "hidden",
-  },
-  dropzoneOver: { border: "2px dashed #06b6d4", background: "#06b6d408" },
-  dropHint: { textAlign: "center", padding: 24 },
-  dropIcon: { fontSize: 42, marginBottom: 10 },
-  dropText: { fontWeight: 600, fontSize: 14, color: "#e8e8f0", marginBottom: 6 },
-  dropSub: { fontSize: 12, color: "#8888a0" },
-  previewWrap: { position: "relative", width: "100%", textAlign: "center" },
-  preview: { width: "100%", maxHeight: 220, objectFit: "contain", borderRadius: 10 },
-  clearBtn: {
-    position: "absolute", top: 8, right: 8, padding: "4px 10px",
-    background: "#00000099", border: "none", color: "#fff",
-    borderRadius: 8, cursor: "pointer", fontSize: 12, fontWeight: 600,
-  },
-  // camera
-  cameraWrap: {
-    borderRadius: 14, overflow: "hidden", background: "#0a0a14",
-    border: "1px solid #ffffff0a", minHeight: 200, position: "relative",
-    display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12,
-  },
-  video: { width: "100%", maxHeight: 220, objectFit: "cover", borderRadius: 10 },
-  captureBtn: {
-    padding: "10px 24px", borderRadius: 24, border: "none",
-    background: "linear-gradient(135deg, #06b6d4, #0891b2)",
-    color: "#fff", fontWeight: 700, cursor: "pointer", fontSize: 14,
-  },
-  camHint: { fontSize: 12, color: "#8888a0" },
-  // text
-  textWrap: { display: "flex", flexDirection: "column", gap: 10 },
-  textarea: {
-    width: "100%", padding: "12px 14px", borderRadius: 12,
-    background: "#1a1a2e", border: "1px solid #ffffff10",
-    color: "#e8e8f0", fontSize: 15, resize: "vertical", outline: "none",
-    fontFamily: "inherit", lineHeight: 1.6, boxSizing: "border-box",
-  },
-  sampleRow: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" },
-  sampleLabel: { fontSize: 11, color: "#8888a0", fontWeight: 600 },
-  sampleBtn: {
-    padding: "3px 10px", borderRadius: 20, border: "1px solid #ffffff10",
-    background: "transparent", color: "#8888a0", cursor: "pointer", fontSize: 11,
-    transition: "all .15s",
-  },
-  // lang row
-  langRow: { display: "flex", alignItems: "flex-end", gap: 8 },
-  langBox: { flex: 1, display: "flex", flexDirection: "column", gap: 4 },
-  langLabel: { fontSize: 10, fontWeight: 700, letterSpacing: 1, color: "#8888a0" },
-  langSel: {
-    padding: "9px 10px", borderRadius: 10,
-    background: "#1a1a2e", border: "1px solid #ffffff10",
-    color: "#e8e8f0", fontSize: 13, outline: "none", cursor: "pointer",
-  },
-  swapBtn: {
-    padding: "9px 12px", borderRadius: 10, border: "1px solid #ffffff10",
-    background: "transparent", color: "#06b6d4", cursor: "pointer", fontSize: 18,
-    marginBottom: 0,
-  },
-  // translate btn
-  translateBtn: {
-    padding: "13px", borderRadius: 12, border: "none",
-    background: "linear-gradient(135deg, #06b6d4, #0284c7)",
-    color: "#fff", fontWeight: 800, fontSize: 15, cursor: "pointer",
-    display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-    boxShadow: "0 4px 20px #06b6d440",
-    transition: "opacity .15s",
-  },
-  spinner: { animation: "spin 1s linear infinite", display: "inline-block" },
-  error: {
-    padding: "10px 14px", borderRadius: 10,
-    background: "#ef444420", border: "1px solid #ef444440",
-    color: "#fca5a5", fontSize: 13,
-  },
-  // result panel
-  resultPanel: {
-    padding: "24px 28px", display: "flex", flexDirection: "column",
-    background: "#0d0d1a",
-  },
-  resultEmpty: {
-    flex: 1, display: "flex", flexDirection: "column",
-    alignItems: "center", justifyContent: "center", gap: 12, textAlign: "center",
-  },
-  emptyGlobe: { fontSize: 56, filter: "grayscale(0.5)" },
-  emptyTitle: { fontWeight: 700, fontSize: 16, color: "#e8e8f0" },
-  emptySub: { fontSize: 13, color: "#8888a0" },
-  resultContent: {
-    display: "flex", flexDirection: "column", gap: 16,
-    animation: "fadeUp .3s ease",
-  },
-  detectedBadge: {
-    fontSize: 12, color: "#94a3b8", display: "flex", alignItems: "center", gap: 8,
-  },
-  engineBadge: {
-    padding: "2px 8px", borderRadius: 20, background: "#06b6d420",
-    color: "#06b6d4", fontSize: 11, fontWeight: 600,
-  },
-  noText: {
-    padding: "20px", textAlign: "center", color: "#8888a0",
-    background: "#ffffff05", borderRadius: 12, fontSize: 14,
-  },
-  block: {
-    background: "#16161f", border: "1px solid #ffffff0a",
-    borderRadius: 14, padding: "14px 16px",
-  },
-  blockHighlight: {
-    background: "linear-gradient(135deg, #064e3b20, #0d2137)",
-    border: "1px solid #34d39930",
-  },
-  blockHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 },
-  blockLabel: { fontSize: 11, fontWeight: 700, letterSpacing: 1, color: "#8888a0" },
-  blockActions: { display: "flex", gap: 6 },
-  iconBtn: {
-    background: "none", border: "none", cursor: "pointer",
-    fontSize: 16, padding: "3px 6px", borderRadius: 6,
-    transition: "background .15s",
-  },
-  blockText: { fontSize: 15, lineHeight: 1.7, color: "#e8e8f0", whiteSpace: "pre-wrap" },
-  translatedText: { fontSize: 17, fontWeight: 600, color: "#34d399" },
-  arrow: {
-    textAlign: "center", fontSize: 13, color: "#06b6d4",
-    fontWeight: 700, letterSpacing: 0.5,
-  },
-  // AR overlay
-  arCard: {
-    borderRadius: 14, overflow: "hidden",
-    border: "1px solid #7c3aed30", background: "#1a0a2e",
-  },
-  arPreviewWrap: { position: "relative" },
-  arImg: { width: "100%", maxHeight: 180, objectFit: "cover", opacity: 0.6 },
-  arOverlay: {
-    position: "absolute", inset: 0, display: "flex",
-    alignItems: "center", justifyContent: "center", padding: 16,
-  },
-  arText: {
-    background: "#7c3aeddd", color: "#fff", padding: "8px 14px",
-    borderRadius: 8, fontSize: 14, fontWeight: 700, textAlign: "center",
-    boxShadow: "0 4px 20px #7c3aed60", backdropFilter: "blur(4px)",
-    maxWidth: "90%", whiteSpace: "pre-wrap",
-  },
-  arLabel: { padding: "8px 14px", fontSize: 11, color: "#a78bfa", fontWeight: 600 },
+  page: { display:"flex", flexDirection:"column", fontFamily:"var(--font-sans)", background:"var(--color-background-primary)", minHeight:"100vh" },
+  hdr: { padding:"20px 28px 16px", borderBottom:"0.5px solid var(--color-border-tertiary)", display:"flex", flexDirection:"column", gap:12 },
+  hdrTop: { display:"flex", alignItems:"center", gap:12 },
+  hdrIcon: { width:38, height:38, borderRadius:"var(--border-radius-md)", background:"var(--color-background-info)", display:"flex", alignItems:"center", justifyContent:"center", color:"var(--color-text-info)", flexShrink:0 },
+  hdrTitle: { fontSize:15, fontWeight:500, color:"var(--color-text-primary)", letterSpacing:"-0.2px" },
+  hdrSub: { fontSize:12, color:"var(--color-text-secondary)", marginTop:2 },
+  ucRow: { display:"flex", flexWrap:"wrap", gap:6 },
+  ucChip: { display:"flex", alignItems:"center", gap:5, padding:"4px 11px", borderRadius:20, border:"0.5px solid var(--color-border-secondary)", background:"transparent", color:"var(--color-text-secondary)", cursor:"pointer", fontSize:12, transition:"all .15s" },
+  ucActive: { borderColor:"#1a73e8", color:"#1a73e8", background:"var(--color-background-info)" },
+  body: { display:"grid", gridTemplateColumns:"1fr 1fr", flex:1 },
+  left: { padding:"22px 26px", borderRight:"0.5px solid var(--color-border-tertiary)", display:"flex", flexDirection:"column", gap:13 },
+  tabs: { display:"flex", border:"0.5px solid var(--color-border-tertiary)", borderRadius:"var(--border-radius-md)", overflow:"hidden" },
+  tab: { flex:1, padding:"8px 10px", border:"none", borderRight:"0.5px solid var(--color-border-tertiary)", background:"transparent", color:"var(--color-text-secondary)", cursor:"pointer", fontSize:12, transition:"all .15s" },
+  tabActive: { background:"var(--color-background-secondary)", color:"var(--color-text-primary)", fontWeight:500 },
+  drop: { border:"0.5px dashed var(--color-border-secondary)", borderRadius:"var(--border-radius-lg)", minHeight:190, display:"flex", alignItems:"center", justifyContent:"center", overflow:"hidden", transition:"border-color .2s" },
+  dropOver: { borderColor:"#1a73e8", background:"var(--color-background-info)" },
+  dropInner: { textAlign:"center", padding:"28px 20px", display:"flex", flexDirection:"column", alignItems:"center", gap:7 },
+  dropIcon: { width:52, height:52, borderRadius:"var(--border-radius-lg)", background:"var(--color-background-secondary)", display:"flex", alignItems:"center", justifyContent:"center", marginBottom:4 },
+  dropTitle: { fontSize:13, fontWeight:500, color:"var(--color-text-primary)" },
+  dropSub: { fontSize:11, color:"var(--color-text-tertiary)" },
+  preview: { width:"100%", maxHeight:230, objectFit:"contain", display:"block" },
+  previewActions: { position:"absolute", top:8, right:8, display:"flex", gap:5 },
+  previewBtn: { padding:"4px 10px", borderRadius:"var(--border-radius-md)", background:"var(--color-background-primary)", border:"0.5px solid var(--color-border-secondary)", color:"var(--color-text-primary)", cursor:"pointer", fontSize:11 },
+  camBox: { borderRadius:"var(--border-radius-lg)", overflow:"hidden", border:"0.5px solid var(--color-border-tertiary)", background:"var(--color-background-secondary)", minHeight:190 },
+  captureBtn: { padding:"8px 20px", borderRadius:20, border:"0.5px solid var(--color-border-secondary)", background:"var(--color-background-primary)", color:"var(--color-text-primary)", cursor:"pointer", fontSize:13 },
+  ta: { width:"100%", padding:"11px 13px", borderRadius:"var(--border-radius-md)", border:"0.5px solid var(--color-border-secondary)", background:"var(--color-background-primary)", color:"var(--color-text-primary)", fontSize:13, resize:"vertical", outline:"none", fontFamily:"var(--font-sans)", lineHeight:1.6, boxSizing:"border-box" },
+  sampleBtn: { padding:"3px 9px", borderRadius:20, border:"0.5px solid var(--color-border-tertiary)", background:"transparent", color:"var(--color-text-secondary)", cursor:"pointer", fontSize:11, transition:"all .15s" },
+  langBar: { display:"flex", alignItems:"flex-end", gap:8, padding:"12px 14px", background:"var(--color-background-secondary)", borderRadius:"var(--border-radius-md)", border:"0.5px solid var(--color-border-tertiary)" },
+  langGroup: { flex:1, display:"flex", flexDirection:"column", gap:5 },
+  lgLabel: { fontSize:9, fontWeight:500, color:"var(--color-text-tertiary)", letterSpacing:"0.1em" },
+  sel: { padding:"7px 9px", borderRadius:"var(--border-radius-md)", border:"0.5px solid var(--color-border-secondary)", background:"var(--color-background-primary)", color:"var(--color-text-primary)", fontSize:12, outline:"none", cursor:"pointer" },
+  swapBtn: { padding:"7px 10px", borderRadius:"var(--border-radius-md)", border:"0.5px solid var(--color-border-secondary)", background:"var(--color-background-primary)", color:"var(--color-text-secondary)", cursor:"pointer", fontSize:15, transition:"all .15s", marginBottom:0 },
+  errBox: { display:"flex", alignItems:"center", gap:7, padding:"9px 12px", borderRadius:"var(--border-radius-md)", background:"var(--color-background-danger)", border:"0.5px solid var(--color-border-danger)", color:"var(--color-text-danger)" },
+  transBtn: { padding:"10px 0", borderRadius:"var(--border-radius-md)", border:"none", background:"#1a73e8", color:"#fff", fontWeight:500, fontSize:13, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", gap:7, transition:"opacity .15s", letterSpacing:"-0.1px" },
+  right: { padding:"22px 26px", background:"var(--color-background-secondary)", display:"flex", flexDirection:"column" },
+  empty: { flex:1, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", textAlign:"center", padding:"40px 16px", gap:7 },
+  emptyIcon: { width:60, height:60, borderRadius:"var(--border-radius-lg)", background:"var(--color-background-primary)", border:"0.5px solid var(--color-border-tertiary)", display:"flex", alignItems:"center", justifyContent:"center", marginBottom:6 },
+  emptyTitle: { fontSize:14, fontWeight:500, color:"var(--color-text-primary)" },
+  emptySub: { fontSize:12, color:"var(--color-text-secondary)", maxWidth:260, lineHeight:1.6 },
+  stepNum: { width:20, height:20, borderRadius:"50%", background:"var(--color-background-primary)", border:"0.5px solid var(--color-border-secondary)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:10, fontWeight:500, color:"var(--color-text-secondary)", flexShrink:0 },
+  infoBadge: { display:"flex", alignItems:"center", gap:5, padding:"3px 9px", borderRadius:20, background:"var(--color-background-info)", color:"var(--color-text-info)", fontSize:11, fontWeight:500 },
+  grayBadge: { padding:"3px 9px", borderRadius:20, background:"var(--color-background-primary)", border:"0.5px solid var(--color-border-tertiary)", color:"var(--color-text-tertiary)", fontSize:11 },
+  card: { background:"var(--color-background-primary)", border:"0.5px solid var(--color-border-tertiary)", borderRadius:"var(--border-radius-lg)", overflow:"hidden" },
+  cardHdr: { display:"flex", justifyContent:"space-between", alignItems:"center", padding:"9px 13px", borderBottom:"0.5px solid var(--color-border-tertiary)" },
+  cardHdrTitle: { fontSize:11, fontWeight:500, color:"var(--color-text-secondary)" },
+  langTag: { fontSize:10, padding:"2px 7px", borderRadius:20, background:"var(--color-background-secondary)", color:"var(--color-text-tertiary)", border:"0.5px solid var(--color-border-tertiary)" },
+  actionBtn: { width:26, height:26, borderRadius:"var(--border-radius-md)", border:"none", background:"transparent", color:"var(--color-text-secondary)", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", transition:"all .15s" },
+  cardBody: { padding:"11px 13px", fontSize:13, lineHeight:1.7, color:"var(--color-text-primary)", whiteSpace:"pre-wrap" },
+  arrowBadge: { display:"flex", alignItems:"center", gap:5, padding:"3px 10px", borderRadius:20, border:"0.5px solid var(--color-border-secondary)", background:"var(--color-background-primary)", color:"var(--color-text-secondary)", fontSize:11, whiteSpace:"nowrap" },
 };
