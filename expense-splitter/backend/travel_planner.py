@@ -370,3 +370,281 @@ async def generate_plan(body: PlanRequest):
         )
         print("Gemini error:", err)
         return demo
+
+
+# ════════════════════════════════════════════════════════════════
+# RECOMMENDATIONS ENGINE
+# ════════════════════════════════════════════════════════════════
+
+from datetime import datetime
+from collections import defaultdict
+from typing import List
+
+# In-memory store per session (keyed by a session_id the frontend sends)
+_search_history: dict[str, list] = defaultdict(list)   # session_id -> list of plan requests
+_plan_history:   dict[str, list] = defaultdict(list)   # session_id -> list of generated plans
+
+# ── Destination metadata for recommendation engine ───────────────
+DEST_META = {
+    # key: { tags, region, budget_tier (1=cheapest,3=priciest), similar }
+    "goa":          {"tags":["beach","party","nature"],      "region":"india",      "tier":1, "similar":["kerala","bali","phuket","maldives"]},
+    "kerala":       {"tags":["nature","culture","backwater"],"region":"india",      "tier":1, "similar":["goa","vietnam","sri lanka","bali"]},
+    "jaipur":       {"tags":["heritage","culture","desert"], "region":"india",      "tier":1, "similar":["udaipur","varanasi","delhi","agra"]},
+    "udaipur":      {"tags":["heritage","romantic","lake"],  "region":"india",      "tier":1, "similar":["jaipur","varanasi","rajasthan"]},
+    "manali":       {"tags":["adventure","snow","nature"],   "region":"india",      "tier":1, "similar":["kashmir","ladakh","himachal"]},
+    "kashmir":      {"tags":["nature","snow","romantic"],    "region":"india",      "tier":1, "similar":["manali","ladakh","himachal"]},
+    "ladakh":       {"tags":["adventure","desert","nature"], "region":"india",      "tier":1, "similar":["manali","kashmir","spiti"]},
+    "bali":         {"tags":["beach","culture","nature"],    "region":"sea",        "tier":2, "similar":["phuket","goa","lombok","vietnam"]},
+    "bangkok":      {"tags":["city","food","culture"],       "region":"sea",        "tier":1, "similar":["phuket","vietnam","kuala lumpur","singapore"]},
+    "phuket":       {"tags":["beach","resort","party"],      "region":"sea",        "tier":2, "similar":["bali","maldives","krabi","samui"]},
+    "singapore":    {"tags":["city","luxury","food"],        "region":"sea",        "tier":3, "similar":["hong kong","kuala lumpur","tokyo"]},
+    "kuala lumpur": {"tags":["city","food","culture"],       "region":"sea",        "tier":1, "similar":["singapore","bangkok","jakarta"]},
+    "maldives":     {"tags":["beach","luxury","romantic"],   "region":"indian_ocean","tier":3,"similar":["seychelles","mauritius","bali","phuket"]},
+    "mauritius":    {"tags":["beach","romantic","nature"],   "region":"indian_ocean","tier":3,"similar":["maldives","bali","seychelles"]},
+    "dubai":        {"tags":["luxury","shopping","city"],    "region":"middle_east","tier":3, "similar":["abu dhabi","singapore","doha"]},
+    "istanbul":     {"tags":["culture","heritage","food"],   "region":"europe",     "tier":2, "similar":["athens","rome","prague","cairo"]},
+    "paris":        {"tags":["romantic","culture","luxury"], "region":"europe",     "tier":3, "similar":["rome","barcelona","amsterdam","prague"]},
+    "rome":         {"tags":["heritage","culture","food"],   "region":"europe",     "tier":3, "similar":["paris","barcelona","athens","florence"]},
+    "barcelona":    {"tags":["beach","culture","food"],      "region":"europe",     "tier":3, "similar":["rome","madrid","lisbon","paris"]},
+    "amsterdam":    {"tags":["culture","city","romantic"],   "region":"europe",     "tier":3, "similar":["brussels","paris","prague","berlin"]},
+    "prague":       {"tags":["heritage","culture","budget"], "region":"europe",     "tier":2, "similar":["vienna","budapest","krakow","warsaw"]},
+    "vienna":       {"tags":["culture","music","luxury"],    "region":"europe",     "tier":3, "similar":["prague","salzburg","budapest","munich"]},
+    "zurich":       {"tags":["luxury","nature","city"],      "region":"europe",     "tier":3, "similar":["geneva","interlaken","munich","vienna"]},
+    "iceland":      {"tags":["adventure","nature","aurora"], "region":"europe",     "tier":3, "similar":["norway","finland","greenland"]},
+    "athens":       {"tags":["heritage","culture","food"],   "region":"europe",     "tier":2, "similar":["rome","istanbul","santorini","crete"]},
+    "santorini":    {"tags":["romantic","beach","luxury"],   "region":"europe",     "tier":3, "similar":["mykonos","bali","maldives","capri"]},
+    "tokyo":        {"tags":["city","culture","food"],       "region":"east_asia",  "tier":3, "similar":["kyoto","osaka","seoul","hong kong"]},
+    "kyoto":        {"tags":["culture","heritage","nature"], "region":"east_asia",  "tier":2, "similar":["tokyo","osaka","nara","hiroshima"]},
+    "osaka":        {"tags":["food","city","culture"],       "region":"east_asia",  "tier":2, "similar":["tokyo","kyoto","hiroshima","kobe"]},
+    "seoul":        {"tags":["city","food","culture"],       "region":"east_asia",  "tier":2, "similar":["tokyo","hong kong","taipei","beijing"]},
+    "hong kong":    {"tags":["city","luxury","food"],        "region":"east_asia",  "tier":3, "similar":["singapore","tokyo","shanghai","macau"]},
+    "new york":     {"tags":["city","luxury","culture"],     "region":"americas",   "tier":3, "similar":["chicago","boston","washington dc","los angeles"]},
+    "los angeles":  {"tags":["city","beach","entertainment"],"region":"americas",   "tier":3, "similar":["san francisco","las vegas","new york","miami"]},
+    "sydney":       {"tags":["city","beach","nature"],       "region":"oceania",    "tier":3, "similar":["melbourne","auckland","fiji","brisbane"]},
+    "kathmandu":    {"tags":["adventure","culture","nature"],"region":"south_asia", "tier":1, "similar":["pokhara","manali","ladakh","darjeeling"]},
+    "pokhara":      {"tags":["adventure","nature","lake"],   "region":"south_asia", "tier":1, "similar":["kathmandu","manali","mussoorie"]},
+    "hanoi":        {"tags":["culture","food","heritage"],   "region":"sea",        "tier":1, "similar":["ho chi minh city","hoi an","da nang","bangkok"]},
+    "ho chi minh city":{"tags":["city","food","culture"],   "region":"sea",        "tier":1, "similar":["hanoi","phnom penh","bangkok","bali"]},
+    "hoi an":       {"tags":["heritage","culture","beach"],  "region":"sea",        "tier":1, "similar":["hanoi","da nang","hue","bali"]},
+}
+
+# Budget tier mapping from plan category
+BUDGET_TIER_MAP = {"budget": 1, "standard": 2, "premium": 3}
+
+# Region groupings for variety
+REGION_GROUPS = {
+    "india":       ["goa","kerala","jaipur","udaipur","manali","kashmir","ladakh","varanasi","hampi","coorg"],
+    "sea":         ["bali","bangkok","phuket","singapore","kuala lumpur","hanoi","ho chi minh city","hoi an","da nang","cambodia"],
+    "middle_east": ["dubai","abu dhabi","muscat","doha","jordan"],
+    "europe":      ["paris","rome","barcelona","amsterdam","prague","vienna","athens","santorini","istanbul","zurich","iceland","lisbon","london"],
+    "east_asia":   ["tokyo","kyoto","osaka","seoul","hong kong","taipei","beijing","shanghai"],
+    "americas":    ["new york","los angeles","cancun","rio de janeiro","buenos aires","machu picchu"],
+    "oceania":     ["sydney","melbourne","new zealand","fiji","bora bora"],
+    "south_asia":  ["kathmandu","pokhara","colombo","male","dhaka"],
+    "indian_ocean":["maldives","mauritius","seychelles","reunion"],
+}
+
+
+class SearchHistoryItem(BaseModel):
+    session_id: str
+    destination: str
+    days: int
+    travelers: int
+    trip_type: str
+    budget_category: str   # "budget" | "standard" | "premium"
+    include_flights: bool
+    timestamp: Optional[str] = None
+
+
+class RecommendRequest(BaseModel):
+    session_id: str
+    current_destination: Optional[str] = None
+    days: Optional[int] = 4
+    travelers: Optional[int] = 2
+    trip_type: Optional[str] = "friends"
+    preferred_budget: Optional[str] = "standard"  # budget|standard|premium
+
+
+def _get_user_profile(session_id: str) -> dict:
+    """Analyse search history to build a user preference profile."""
+    history = _search_history.get(session_id, [])
+    if not history:
+        return {}
+
+    tag_counts:    defaultdict = defaultdict(int)
+    region_counts: defaultdict = defaultdict(int)
+    tier_sum = 0
+    type_counts:   defaultdict = defaultdict(int)
+    visited = set()
+
+    for item in history:
+        key = item["destination"].lower()
+        visited.add(key)
+        meta = DEST_META.get(key, {})
+        for tag in meta.get("tags", []):
+            tag_counts[tag] += 1
+        region = meta.get("region", "")
+        if region:
+            region_counts[region] += 1
+        tier_sum += BUDGET_TIER_MAP.get(item.get("budget_category","standard"), 2)
+        type_counts[item.get("trip_type","friends")] += 1
+
+    avg_tier = tier_sum / len(history) if history else 2
+    top_tags    = sorted(tag_counts,    key=lambda x: -tag_counts[x])[:3]
+    top_regions = sorted(region_counts, key=lambda x: -region_counts[x])[:2]
+    top_type    = max(type_counts, key=type_counts.get) if type_counts else "friends"
+
+    return {
+        "top_tags":    top_tags,
+        "top_regions": top_regions,
+        "avg_tier":    round(avg_tier, 1),
+        "top_type":    top_type,
+        "visited":     visited,
+        "search_count": len(history),
+    }
+
+
+def _score_destination(dest_key: str, profile: dict, requested_tier: int, current_key: str) -> float:
+    """Score a destination 0–100 based on how well it matches the profile."""
+    if dest_key == current_key:
+        return -1  # never recommend same destination
+    if dest_key in profile.get("visited", set()):
+        return -1  # already searched this
+
+    meta = DEST_META.get(dest_key, {})
+    score = 0.0
+
+    # Tag match — up to 40 pts
+    top_tags = profile.get("top_tags", [])
+    dest_tags = meta.get("tags", [])
+    tag_overlap = len(set(top_tags) & set(dest_tags))
+    score += tag_overlap * (40 / max(len(top_tags), 1))
+
+    # Region match — up to 25 pts
+    top_regions = profile.get("top_regions", [])
+    if meta.get("region") in top_regions:
+        score += 25
+
+    # Budget tier proximity — up to 20 pts
+    dest_tier = meta.get("tier", 2)
+    tier_diff = abs(dest_tier - requested_tier)
+    score += max(0, 20 - tier_diff * 8)
+
+    # Novelty bonus — up to 15 pts (prefer unexplored regions)
+    if meta.get("region") not in top_regions:
+        score += 8
+
+    return score
+
+
+def _budget_range_for_tier(tier: int, days: int, travelers: int) -> tuple:
+    """Return (low, high) INR estimate for a tier."""
+    per_person_per_day = {1: 4000, 2: 8000, 3: 15000}  # rough daily incl. all
+    ppd = per_person_per_day[tier]
+    base = ppd * days * travelers
+    return int(base * 0.85), int(base * 1.20)
+
+
+@router.post("/history/add")
+def add_to_history(item: SearchHistoryItem):
+    """Frontend calls this after each plan generation to track search."""
+    item.timestamp = item.timestamp or datetime.utcnow().isoformat()
+    _search_history[item.session_id].append(item.dict())
+    # Keep last 20 searches per session
+    if len(_search_history[item.session_id]) > 20:
+        _search_history[item.session_id] = _search_history[item.session_id][-20:]
+    return {"ok": True, "count": len(_search_history[item.session_id])}
+
+
+@router.get("/history/{session_id}")
+def get_history(session_id: str):
+    return {
+        "history": _search_history.get(session_id, []),
+        "profile": _get_user_profile(session_id),
+    }
+
+
+@router.post("/recommendations")
+def get_recommendations(body: RecommendRequest):
+    """Return personalised destination recommendations with budget estimates."""
+    profile   = _get_user_profile(body.session_id)
+    req_tier  = BUDGET_TIER_MAP.get(body.preferred_budget or "standard", 2)
+    current   = (body.current_destination or "").lower()
+
+    # Score all known destinations
+    scored = []
+    for dest_key, meta in DEST_META.items():
+        s = _score_destination(dest_key, profile, req_tier, current)
+        if s >= 0:
+            lo, hi = _budget_range_for_tier(meta.get("tier",2), body.days or 4, body.travelers or 2)
+            scored.append({
+                "destination":   dest_key.title(),
+                "tags":          meta.get("tags", []),
+                "region":        meta.get("region", "").replace("_"," ").title(),
+                "budget_tier":   ["Budget","Standard","Premium"][meta.get("tier",2)-1],
+                "est_low_inr":   lo,
+                "est_high_inr":  hi,
+                "match_score":   round(s, 1),
+                "why":           _why_text(dest_key, profile, meta),
+            })
+
+    scored.sort(key=lambda x: -x["match_score"])
+
+    # Return top 8, ensuring region diversity
+    seen_regions = set()
+    diverse = []
+    for r in scored:
+        reg = r["region"]
+        if reg not in seen_regions or len(diverse) < 4:
+            diverse.append(r)
+            seen_regions.add(reg)
+        if len(diverse) >= 8:
+            break
+
+    # If no history yet, return curated popular list
+    if not profile:
+        diverse = _default_recommendations(req_tier, body.days or 4, body.travelers or 2)
+
+    return {
+        "recommendations": diverse,
+        "profile": profile,
+        "based_on_searches": len(_search_history.get(body.session_id, [])),
+    }
+
+
+def _why_text(dest_key: str, profile: dict, meta: dict) -> str:
+    """Generate a short human-readable reason for recommendation."""
+    top_tags = profile.get("top_tags", [])
+    shared = list(set(top_tags) & set(meta.get("tags", [])))
+    if shared:
+        return f"Matches your interest in {', '.join(shared[:2])} travel"
+    if meta.get("region") in profile.get("top_regions", []):
+        return f"Popular in {meta['region'].replace('_',' ').title()} — a region you love"
+    tier = meta.get("tier", 2)
+    tier_names = {1:"budget-friendly",2:"mid-range",3:"premium"}
+    return f"A {tier_names[tier]} destination worth exploring"
+
+
+def _default_recommendations(tier: int, days: int, travelers: int) -> list:
+    """Curated recommendations when no history exists."""
+    defaults = {
+        1: ["goa","bali","bangkok","kerala","kathmandu","hanoi","jaipur","manali"],
+        2: ["bali","prague","istanbul","kyoto","barcelona","hoi an","udaipur","phuket"],
+        3: ["maldives","dubai","paris","tokyo","santorini","singapore","new york","zurich"],
+    }
+    picks = defaults.get(tier, defaults[2])
+    result = []
+    for d in picks:
+        meta = DEST_META.get(d, {})
+        lo, hi = _budget_range_for_tier(meta.get("tier", tier), days, travelers)
+        result.append({
+            "destination":  d.title(),
+            "tags":         meta.get("tags", []),
+            "region":       meta.get("region","").replace("_"," ").title(),
+            "budget_tier":  ["Budget","Standard","Premium"][meta.get("tier",2)-1],
+            "est_low_inr":  lo,
+            "est_high_inr": hi,
+            "match_score":  0,
+            "why":          "Popular pick for your budget range",
+        })
+    return result
