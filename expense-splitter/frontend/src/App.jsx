@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { get, post, patch, del } from "./utils/api";
 import Translator from "./components/translator/Translator";
+import TravelPlanner from "./components/travel/TravelPlanner";
 
 // ── tiny helpers ────────────────────────────────────────────────
 const fmt = (n) => `₹${Number(n).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -23,7 +24,7 @@ export default function App() {
   const [balances, setBalances] = useState(null);
   const [settlements, setSettlements] = useState([]);
   const [view, setView] = useState("groups"); // groups | expenses | balances | settle
-  const [page, setPage] = useState("expenses"); // expenses | translator
+  const [page, setPage] = useState("expenses"); // expenses | translator | travel
   const [loading, setLoading] = useState(false);
   const [toast, setToast] = useState(null);
   const [modal, setModal] = useState(null); // null | "group" | "expense" | "member"
@@ -170,9 +171,14 @@ export default function App() {
           onClick={() => setPage("translator")}>
           🌐 Travel Translator
         </button>
+        <button style={{...styles.topNavBtn, ...(page==="travel" ? styles.topNavActive : {})}}
+          onClick={() => setPage("travel")}>
+          ✈️ Trip Planner
+        </button>
       </div>
 
       {page === "translator" && <Translator />}
+      {page === "travel" && <TravelPlanner />}
 
       {page === "expenses" && (
       <div style={styles.expensesWrapper}>
@@ -601,6 +607,7 @@ const styles = {
     color: "#e8e8f0", borderBottom: "2px solid #06b6d4",
     background: "#06b6d408",
   },
+  topNavDivider: { width:"0.5px", background:"#ffffff10", flexShrink:0 },
   expensesWrapper: { display: "flex", flex: 1, flexDirection: "row", minHeight: 0, overflow: "hidden" },
   root: {
     display: "flex",

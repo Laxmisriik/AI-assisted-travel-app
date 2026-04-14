@@ -1,372 +1,241 @@
 """
-Travel Planner Module — FastAPI version
-Converted from Flask. Integrates with existing FastAPI app via APIRouter.
-Uses Gemini AI for plan generation with a smart demo fallback.
+Language Translation Module
+OCR:         EasyOCR (primary) -> pytesseract (fallback) -> Google Vision
+Translation: deep-translator (free, no key) -> googletrans -> Google Cloud
 """
 
-import json, math, os, re
-from typing import Optional
-import httpx
-from fastapi import APIRouter, HTTPException, Query
+import os, base64, io, traceback
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+from typing import Optional
+from PIL import Image as PILImage
 
-router = APIRouter(prefix="/travel", tags=["travel-planner"])
+router = APIRouter(prefix="/translate", tags=["translator"])
 
-MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-
-POPULAR_DESTINATIONS = [
-    "Paris", "Bali", "Tokyo", "Kyoto", "Osaka", "London", "Rome", "Barcelona", "Dubai",
-    "Singapore", "Bangkok", "Phuket", "Istanbul", "New York", "Los Angeles", "Sydney",
-    "Melbourne", "Zurich", "Amsterdam", "Prague", "Vienna", "Athens", "Santorini",
-    "Seoul", "Hong Kong", "Kuala Lumpur", "Maldives", "Mauritius", "Iceland",
-    "Kerala", "Goa", "Jaipur", "Udaipur", "Varanasi", "Manali", "Kashmir", "Ladakh",
-    "Hyderabad", "Delhi", "Mumbai", "Chennai", "Kolkata", "Bengaluru", "Pune",
-    "Hanoi", "Ho Chi Minh City", "Da Nang", "Hoi An", "Kathmandu", "Pokhara",
-    "Paro", "Thimphu", "Thailand", "Japan", "France",
-]
-
-INDIAN_DESTINATIONS = {
-    "hyderabad","delhi","mumbai","chennai","kolkata","bengaluru","pune",
-    "goa","kerala","jaipur","udaipur","varanasi","manali","kashmir","ladakh",
-}
-SHORT_HAUL = {"dubai","maldives","bali","bangkok","phuket","singapore","kuala lumpur","thailand","mauritius","istanbul"}
-LONG_HAUL  = {"tokyo","japan","paris","france","london","rome","barcelona","new york","los angeles","sydney","melbourne","zurich","amsterdam","prague","vienna","athens","seoul","hong kong","iceland"}
-
-TRAVEL_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "destination":            {"type": "string"},
-        "normalized_destination": {"type": "string"},
-        "trip_summary":           {"type": "string"},
-        "assumptions":            {"type": "array", "items": {"type": "string"}},
-        "budget_options": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "plan_name":                    {"type": "string"},
-                    "range_label":                  {"type": "string"},
-                    "category":                     {"type": "string", "enum": ["budget","standard","premium"]},
-                    "total_estimate_inr":            {"type": "integer"},
-                    "flight_estimate_inr":           {"type": "integer"},
-                    "accommodation_estimate_inr":    {"type": "integer"},
-                    "transport_estimate_inr":        {"type": "integer"},
-                    "airport_transfer_estimate_inr": {"type": "integer"},
-                    "food_estimate_inr":             {"type": "integer"},
-                    "activities_estimate_inr":       {"type": "integer"},
-                    "visa_estimate_inr":             {"type": "integer"},
-                    "taxes_fees_estimate_inr":       {"type": "integer"},
-                    "misc_estimate_inr":             {"type": "integer"},
-                    "best_for":                     {"type": "string"},
-                    "optimization_tips":            {"type": "array","items":{"type":"string"}},
-                    "itinerary": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "day_number":             {"type": "integer"},
-                                "title":                  {"type": "string"},
-                                "tourist_places":         {"type": "array","items":{"type":"string"}},
-                                "transport_mode":         {"type": "string"},
-                                "food_plan":              {"type": "string"},
-                                "estimated_day_cost_inr": {"type": "integer"},
-                                "summary":                {"type": "string"},
-                            },
-                        },
-                    },
-                },
-            },
-        },
-    },
+LANGUAGES = {
+    "auto": "Auto Detect", "en": "English", "ta": "Tamil", "hi": "Hindi",
+    "ja": "Japanese", "zh": "Chinese", "ko": "Korean", "fr": "French",
+    "de": "German", "es": "Spanish", "ar": "Arabic", "ru": "Russian",
+    "pt": "Portuguese", "it": "Italian",
 }
 
+class TranslateTextRequest(BaseModel):
+    text: str
+    source_lang: Optional[str] = "auto"
+    target_lang: Optional[str] = "en"
 
-# ── Schemas ──────────────────────────────────────────────────────
-class PlanRequest(BaseModel):
-    destination:    str
-    originCity:     str   = "Hyderabad"
-    travelMonth:    str   = "December"
-    days:           int   = 4
-    travelers:      int   = 2
-    tripType:       str   = "friends"
-    includeFlights: bool  = True
-
-
-# ── Helpers ──────────────────────────────────────────────────────
-def normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", (text or "").strip()).title()
-
-def nkey(text: str) -> str:
-    return normalize(text).lower()
-
-def bucket(dest: str) -> str:
-    k = nkey(dest)
-    if k in INDIAN_DESTINATIONS: return "domestic"
-    if k in SHORT_HAUL:          return "short_haul"
-    if k in LONG_HAUL:           return "long_haul"
-    return "international"
-
-def season_mult(month: str) -> float:
-    m = nkey(month)
-    if m in {"november","december","january","may"}:   return 1.15
-    if m in {"april","june","july","august"}:           return 1.05
-    return 1.0
-
-def rooms(travelers: int, trip_type: str) -> int:
-    return max(1, math.ceil(travelers / (3 if trip_type == "family" else 2)))
-
-def plan_name(cat: str) -> str:
-    return {"budget":"Economical Escape","standard":"Comfortable Journey","premium":"Luxury Indulgence"}[cat]
-
-def best_for(cat: str, trip_type: str) -> str:
-    base = trip_type.title()
-    if cat == "budget":   return f"{base} travelers looking for value without missing key sights."
-    if cat == "standard": return f"{base} travelers wanting a balanced trip with comfort and great experiences."
-    return f"{base} travelers seeking premium stays, dining, and exclusive activities."
-
-def flight_est(dest, origin, travelers, cat, month, include):
-    if not include: return 0
-    b = bucket(dest); s = season_mult(month)
-    rates = {
-        "domestic":      {"budget":6000,  "standard":10000, "premium":18000},
-        "short_haul":    {"budget":25000, "standard":38000, "premium":65000},
-        "long_haul":     {"budget":55000, "standard":85000, "premium":140000},
-        "international": {"budget":35000, "standard":55000, "premium":90000},
-    }
-    total = rates[b][cat] * max(travelers,1) * s
-    major = {"hyderabad","delhi","mumbai","chennai","bengaluru","kolkata","pune"}
-    if nkey(origin) not in major and b != "domestic":
-        total *= 1.25
-    return int(total)
-
-def visa_est(dest, travelers):
-    b = bucket(dest); k = nkey(dest)
-    if b == "domestic": return 0
-    if k == "dubai":    return 7000 * max(travelers,1)
-    if b == "short_haul": return 4500 * max(travelers,1)
-    if b == "long_haul":  return 9000 * max(travelers,1)
-    return 6000 * max(travelers,1)
-
-SEED_PLACES = {
-    "dubai":    ["Burj Khalifa","Dubai Mall","Dubai Fountain","Museum of the Future","Desert Safari","Dubai Marina","Palm Jumeirah","Al Fahidi Historical District"],
-    "tokyo":    ["Shibuya Crossing","Senso-ji Temple","Tokyo Skytree","Meiji Shrine","Asakusa","Shinjuku","Odaiba","TeamLab Planets"],
-    "bali":     ["Ubud","Tegallalang Rice Terraces","Tanah Lot Temple","Uluwatu Temple","Seminyak Beach","Nusa Dua","Ubud Palace","Kuta"],
-    "paris":    ["Eiffel Tower","Louvre Museum","Seine River Cruise","Montmartre","Arc de Triomphe","Notre-Dame Area","Palace of Versailles","Champs-Élysées"],
-    "goa":      ["Baga Beach","Calangute Beach","Fort Aguada","Anjuna","Old Goa Churches","Dudhsagar Falls","Candolim","Chapora Fort"],
-    "maldives": ["Male City","Resort Island Lagoon","Sandbank Excursion","Sunset Cruise","Snorkeling Reef","Water Villa Area"],
-    "singapore":["Marina Bay Sands","Gardens by the Bay","Sentosa Island","Orchard Road","Chinatown","Little India","Universal Studios","Clarke Quay"],
-    "london":   ["Big Ben","Tower of London","Buckingham Palace","British Museum","Hyde Park","The Shard","Covent Garden","Oxford Street"],
-    "bangkok":  ["Grand Palace","Wat Pho","Chatuchak Market","Khao San Road","Chao Phraya River","MBK Center","Lumphini Park","Wat Arun"],
-}
-
-DAY_TITLES = {
-    "dubai":  ["Arrival & Iconic Landmarks","Desert Adventure & Culture","Modern Dubai & Marina","Shopping & Departure","Relaxed Exploration"],
-    "tokyo":  ["Arrival & City Icons","Temples & Traditional Districts","Pop Culture & Skyline Views","Shopping & Departure","Leisure Exploration"],
-    "bali":   ["Arrival & Rice Terraces","Temples & Spiritual Bali","Beach & Sunset Views","Adventure Day","Relaxed Departure"],
-    "paris":  ["Arrival & Eiffel Tower","Louvre & Museums","Versailles Day Trip","Montmartre & Cafés","Shopping & Departure"],
-}
-DEFAULT_TITLES = ["Arrival & City Highlights","Major Attractions Day","Culture & Food Trail","Shopping & Departure","Flexible Exploration"]
+class TranslateImageRequest(BaseModel):
+    image_base64: str
+    source_lang: Optional[str] = "auto"
+    target_lang: Optional[str] = "en"
 
 
-def build_demo(dest, days, travelers, trip_type, origin, month, include_flights):
-    norm = normalize(dest); k = nkey(dest); b = bucket(dest)
-    nights = max(1, days-1); r = rooms(travelers, trip_type); s = season_mult(month)
+def open_image(image_bytes: bytes) -> PILImage.Image:
+    # try pillow-avif-plugin if available
+    try:
+        import pillow_avif  # noqa
+    except ImportError:
+        pass
+    buf = io.BytesIO(image_bytes)
+    img = PILImage.open(buf)
+    img.load()
+    return img.convert("RGB")
 
-    accom_rates = {
-        "domestic":      {"budget":3500, "standard":6500,  "premium":14000},
-        "short_haul":    {"budget":5000, "standard":9000,  "premium":18000},
-        "long_haul":     {"budget":7000, "standard":13000, "premium":28000},
-        "international": {"budget":6000, "standard":10000, "premium":21000},
-    }
-    transport_pd = {
-        "domestic":      {"budget":1500, "standard":2500, "premium":4500},
-        "short_haul":    {"budget":2500, "standard":4000, "premium":8000},
-        "long_haul":     {"budget":3000, "standard":5000, "premium":9000},
-        "international": {"budget":2500, "standard":4500, "premium":8500},
-    }
-    airport_tx = {
-        "domestic":      {"budget":1200, "standard":2500,  "premium":5000},
-        "short_haul":    {"budget":3500, "standard":6000,  "premium":12000},
-        "long_haul":     {"budget":4500, "standard":7000,  "premium":15000},
-        "international": {"budget":4000, "standard":6500,  "premium":13000},
-    }
-    food_ppd = {
-        "domestic":      {"budget":1200, "standard":2200, "premium":4000},
-        "short_haul":    {"budget":1800, "standard":3000, "premium":5500},
-        "long_haul":     {"budget":2500, "standard":4000, "premium":7000},
-        "international": {"budget":2000, "standard":3200, "premium":6000},
-    }
-    acts_ppd = {
-        "domestic":      {"budget":1500, "standard":3000,  "premium":6000},
-        "short_haul":    {"budget":3000, "standard":6000,  "premium":12000},
-        "long_haul":     {"budget":4000, "standard":8000,  "premium":16000},
-        "international": {"budget":3200, "standard":6500,  "premium":13000},
-    }
-    misc_base = {"budget":6000,"standard":9000,"premium":15000}
 
-    places = SEED_PLACES.get(k, [
-        f"{norm} City Center", f"Top Museum in {norm}", f"Popular Market in {norm}",
-        f"Heritage Landmark in {norm}", f"Iconic Viewpoint in {norm}", f"Main Attraction in {norm}",
-    ])
-    titles = DAY_TITLES.get(k, DEFAULT_TITLES)
+def preprocess_for_ocr(img: PILImage.Image) -> PILImage.Image:
+    """Enhance image for better OCR accuracy."""
+    # Resize if too small — Tesseract works best at 300+ DPI
+    w, h = img.size
+    if w < 1000:
+        scale = 1000 / w
+        img = img.resize((int(w * scale), int(h * scale)), PILImage.LANCZOS)
 
-    transport_label = {
-        "budget":   "Metro / public transport / shared cabs",
-        "standard": "Metro + taxis / ride-hailing mix",
-        "premium":  "Private cab / chauffeur / premium transfers",
-    }
-    food_label = {
-        "budget":   "Local eateries and value-for-money cafes",
-        "standard": "Good local restaurants with a few premium meals",
-        "premium":  "Fine dining and premium restaurant experiences",
-    }
+    # Convert to grayscale
+    img = img.convert("L")
 
-    def make_option(cat):
-        fl  = flight_est(dest, origin, travelers, cat, month, include_flights)
-        ac  = int(accom_rates[b][cat] * nights * r * s)
-        tr  = int(transport_pd[b][cat] * max(days,1) * s)
-        at  = int(airport_tx[b][cat] * s)
-        fo  = int(food_ppd[b][cat] * max(days,1) * max(travelers,1) * s)
-        ac2 = int(acts_ppd[b][cat] * max(days,1) * max(travelers,1) * s)
-        vi  = visa_est(dest, travelers)
-        tx  = int(0.06*(fl+ac+ac2) + 0.02*fo)
-        mi  = int(misc_base[cat] * s)
-        total = fl+ac+tr+at+fo+ac2+vi+tx+mi
+    # Increase contrast
+    from PIL import ImageEnhance, ImageFilter
+    img = ImageEnhance.Contrast(img).enhance(2.0)
+    img = ImageEnhance.Sharpness(img).enhance(2.0)
 
-        day_weights = [1.05] + [1.0]*max(0,days-2) + [0.95]
-        ws = sum(day_weights[:days])
+    # Slight denoise
+    img = img.filter(ImageFilter.MedianFilter(size=1))
 
-        itinerary = []
-        for i in range(days):
-            p1 = places[i % len(places)]; p2 = places[(i+1) % len(places)]
-            itinerary.append({
-                "day_number": i+1,
-                "title": titles[i % len(titles)],
-                "tourist_places": [p1, p2],
-                "transport_mode": transport_label[cat],
-                "food_plan": food_label[cat],
-                "estimated_day_cost_inr": int(total * (day_weights[i] / ws)),
-                "summary": f"Visit {p1} and {p2} — {cat} {trip_type} plan in {norm}.",
-            })
+    return img
 
-        low = int(total*0.92); high = int(total*1.10)
-        return {
-            "plan_name": plan_name(cat),
-            "range_label": f"₹{low:,} – ₹{high:,}",
-            "category": cat,
-            "total_estimate_inr": total,
-            "flight_estimate_inr": fl,
-            "accommodation_estimate_inr": ac,
-            "transport_estimate_inr": tr,
-            "airport_transfer_estimate_inr": at,
-            "food_estimate_inr": fo,
-            "activities_estimate_inr": ac2,
-            "visa_estimate_inr": vi,
-            "taxes_fees_estimate_inr": tx,
-            "misc_estimate_inr": mi,
-            "best_for": best_for(cat, trip_type),
-            "optimization_tips": [
-                "Book flights and hotels early for better bundled pricing.",
-                "Use combo attraction passes where available.",
-                "Keep one light sightseeing day to reduce transport and meal spend.",
-            ],
-            "itinerary": itinerary,
+
+def extract_text_from_image(image_bytes: bytes, source_lang: str = "auto") -> dict:
+    errors = []
+
+    # 1. Tesseract OCR (primary - install from https://github.com/UB-Mannheim/tesseract/wiki)
+    try:
+        import pytesseract
+        for p in [
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+            "/usr/bin/tesseract", "/usr/local/bin/tesseract"
+        ]:
+            if os.path.exists(p):
+                pytesseract.pytesseract.tesseract_cmd = p
+                break
+        img = preprocess_for_ocr(open_image(image_bytes))
+        # use language-specific tessdata if available
+        lang_map = {
+            "ta": "tam", "hi": "hin", "ja": "jpn", "zh": "chi_sim",
+            "ko": "kor", "fr": "fra", "de": "deu", "es": "spa",
+            "ar": "ara", "ru": "rus", "en": "eng",
         }
+        tess_lang = lang_map.get(source_lang, "eng") if source_lang not in ("auto","und") else "eng"
+        # always include eng as fallback
+        if tess_lang != "eng":
+            tess_lang = f"{tess_lang}+eng"
+        text = pytesseract.image_to_string(img, lang=tess_lang).strip()
+        detected = source_lang if source_lang not in ("auto", "und") else "und"
+        return {"text": text, "detected_lang": detected, "source": "tesseract"}
+    except Exception as e:
+        errors.append(f"Tesseract: {e}")
 
-    fn = "included" if include_flights else "excluded"
-    return {
-        "destination": dest,
-        "normalized_destination": norm,
-        "trip_summary": f"This {days}-day {trip_type} trip to {norm}: hotels, food, local transport, activities, taxes/fees included. Flights are {fn}.",
-        "assumptions": [
-            f"Origin city: {normalize(origin)}.",
-            f"Travel month: {normalize(month)}.",
-            "All prices in INR — may vary by season, booking date, and preferences.",
-            "Visa included for international destinations where applicable.",
-        ],
-        "budget_options": [make_option("budget"), make_option("standard"), make_option("premium")],
-    }
+    # 2. EasyOCR (fallback - may not work on Python 3.13)
+    try:
+        import easyocr
+        import numpy as np
+        img = open_image(image_bytes)
+        img_np = np.array(img)
+        reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+        results = reader.readtext(img_np, detail=0, paragraph=True)
+        text = "\n".join(results).strip()
+        detected = source_lang if source_lang not in ("auto", "und") else "und"
+        return {"text": text, "detected_lang": detected, "source": "easyocr"}
+    except Exception as e:
+        errors.append(f"EasyOCR: {e}")
+    # 2. Tesseract
+    try:
+        import pytesseract
+        for p in [
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+            "/usr/bin/tesseract", "/usr/local/bin/tesseract"
+        ]:
+            if os.path.exists(p):
+                pytesseract.pytesseract.tesseract_cmd = p
+                break
+        img = open_image(image_bytes)
+        text = pytesseract.image_to_string(img).strip()
+        return {"text": text, "detected_lang": "und", "source": "tesseract"}
+    except Exception as e:
+        errors.append(f"Tesseract: {e}")
 
+    # 3. Google Vision
+    try:
+        from google.cloud import vision
+        client = vision.ImageAnnotatorClient()
+        resp = client.text_detection(vision.Image(content=image_bytes))
+        if resp.text_annotations:
+            return {"text": resp.text_annotations[0].description.strip(),
+                    "detected_lang": "und", "source": "google_vision"}
+        return {"text": "", "detected_lang": "und", "source": "google_vision"}
+    except Exception as e:
+        errors.append(f"Google Vision: {e}")
 
-async def call_gemini(req: PlanRequest) -> dict:
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError("Missing GEMINI_API_KEY in environment")
-
-    prompt = f"""
-You are a travel planning engine for realistic trip budgeting.
-
-Destination: {req.destination}
-Origin city: {req.originCity}
-Trip length: {req.days} days
-Travelers: {req.travelers}
-Trip type: {req.tripType}
-Travel month: {req.travelMonth}
-Include flights: {req.includeFlights}
-
-Return exactly 3 budget options (budget, standard, premium) with:
-- All cost components in INR integers
-- Realistic amounts for the destination and traveler count
-- Day-wise itinerary with real tourist attractions
-- total_estimate_inr must be the sum of all components
-
-Return only JSON matching the schema. Do not underestimate expensive destinations.
-""".strip()
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={api_key}"
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "response_mime_type": "application/json",
-            "response_json_schema": TRAVEL_SCHEMA,
-        },
-    }
-
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(url, json=payload)
-        resp.raise_for_status()
-        data = resp.json()
-        text = data["candidates"][0]["content"]["parts"][0]["text"]
-        return json.loads(text)
+    raise HTTPException(status_code=500, detail="OCR failed: " + " | ".join(errors))
 
 
-# ── Routes ────────────────────────────────────────────────────────
+def translate_text(text: str, source: str, target: str) -> dict:
+    if not text.strip():
+        return {"translated": "", "detected_lang": source, "source": "none"}
 
-@router.get("/health")
-def travel_health():
-    return {"ok": True, "gemini_key_set": bool(os.getenv("GEMINI_API_KEY"))}
+    errors = []
+
+    # 1. deep-translator
+    try:
+        from deep_translator import GoogleTranslator
+        src = "auto" if source in ("auto", "und") else source
+        translated = GoogleTranslator(source=src, target=target).translate(text)
+        return {"translated": translated, "detected_lang": source, "source": "deep_translator"}
+    except Exception as e:
+        errors.append(f"deep_translator: {e}")
+
+    # 2. googletrans
+    try:
+        from googletrans import Translator
+        t = Translator()
+        src = "auto" if source in ("auto", "und") else source
+        res = t.translate(text, src=src, dest=target)
+        return {"translated": res.text, "detected_lang": res.src, "source": "googletrans"}
+    except Exception as e:
+        errors.append(f"googletrans: {e}")
+
+    # 3. Google Cloud Translate
+    try:
+        from google.cloud import translate_v2 as gt
+        client = gt.Client()
+        src = None if source in ("auto", "und") else source
+        result = client.translate(text, source_language=src, target_language=target)
+        return {"translated": result["translatedText"],
+                "detected_lang": result.get("detectedSourceLanguage", source),
+                "source": "google_cloud"}
+    except Exception as e:
+        errors.append(f"Google Cloud: {e}")
+
+    raise HTTPException(status_code=500, detail="Translation failed: " + " | ".join(errors))
 
 
-@router.get("/suggestions")
-def suggestions(q: str = Query(default="")):
-    q = q.strip().lower()
-    if not q:
-        return {"suggestions": POPULAR_DESTINATIONS[:10]}
-    matches = [d for d in POPULAR_DESTINATIONS if q in d.lower()]
-    return {"suggestions": matches[:10]}
+@router.get("/languages")
+def get_languages():
+    return LANGUAGES
 
 
-@router.post("/generate-plan")
-async def generate_plan(body: PlanRequest):
-    if not body.destination.strip():
-        raise HTTPException(status_code=400, detail="Destination is required")
+@router.get("/test-ocr")
+def test_ocr():
+    try:
+        import easyocr
+        easyocr.Reader(["en"], gpu=False, verbose=False)
+        return {"status": "ok", "engine": "easyocr"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+
+@router.post("/text")
+def translate_text_route(body: TranslateTextRequest):
+    try:
+        result = translate_text(body.text, body.source_lang, body.target_lang)
+        return {"original": body.text, "translated": result["translated"],
+                "detected_lang": result["detected_lang"], "target_lang": body.target_lang,
+                "engine": result["source"]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/image")
+async def translate_image_route(body: TranslateImageRequest):
+    try:
+        b64 = body.image_base64.strip()
+        if "," in b64:
+            b64 = b64.split(",", 1)[1]
+        b64 += "=" * (-len(b64) % 4)
+        image_bytes = base64.b64decode(b64)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid base64: {e}")
 
     try:
-        result = await call_gemini(body)
-        result["source"] = "gemini"
-        return result
+        ocr = extract_text_from_image(image_bytes, body.source_lang)
+        if not ocr["text"]:
+            return {"original": "", "translated": "", "detected_lang": "und",
+                    "target_lang": body.target_lang, "ocr_engine": ocr["source"],
+                    "message": "No text detected in image"}
+
+        source = ocr["detected_lang"] if body.source_lang == "auto" else body.source_lang
+        trans = translate_text(ocr["text"], source, body.target_lang)
+
+        return {"original": ocr["text"], "translated": trans["translated"],
+                "detected_lang": trans["detected_lang"], "target_lang": body.target_lang,
+                "ocr_engine": ocr["source"], "trans_engine": trans["source"]}
+
+    except HTTPException:
+        raise
     except Exception as e:
-        err = str(e)
-        demo = build_demo(
-            dest=body.destination, days=body.days, travelers=body.travelers,
-            trip_type=body.tripType, origin=body.originCity,
-            month=body.travelMonth, include_flights=body.includeFlights,
-        )
-        demo["source"] = "demo"
-        demo["fallback_reason"] = (
-            "Gemini rate limit reached. Please wait and try again."
-            if "429" in err or "RESOURCE_EXHAUSTED" in err
-            else "Gemini API key not set or temporarily unavailable — showing estimated plan."
-        )
-        print("Gemini error:", err)
-        return demo
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))

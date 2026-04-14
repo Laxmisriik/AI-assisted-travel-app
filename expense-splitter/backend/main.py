@@ -10,6 +10,8 @@ app = FastAPI(title="Expense Splitter API")
 # ── Translator module ─────────────────────────────────────────────
 from translator import router as translator_router
 app.include_router(translator_router)
+from travel_planner import router as travel_router 
+app.include_router(travel_router)
 
 app.add_middleware(
     CORSMiddleware,
